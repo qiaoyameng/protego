@@ -89,6 +89,47 @@ Using Protego with Requests_:
 .. _Requests: https://3.python-requests.org/
 
 
+Comparing robots.txt versions
+=============================
+
+Before publishing a new ``robots.txt``, you can compare its crawl policy
+against the current version for a given user agent, instead of probing a
+handful of sample URLs:
+
+.. code-block:: pycon
+
+   >>> from protego import Protego, compare_policies
+   >>> old = Protego.parse("User-agent: *\nDisallow: /cdn/\nAllow: /cdn/*/public/\n")
+   >>> new = Protego.parse("User-agent: *\nDisallow: /cdn/\nAllow: /cdn/public/\n")
+   >>> result = compare_policies(old, new, "mybot")
+   >>> result.status
+   'different'
+   >>> result.path, result.old_verdict, result.new_verdict
+   ('/cdn/public/', False, True)
+
+A sample URL list would likely try ``/cdn/x/public/logo.png`` and miss this:
+``*`` also matches an empty sequence, so the old pattern never covered
+``/cdn/public/`` itself.
+
+``compare_policies`` compiles the rules of each version into finite automata
+and explores their product, so it accounts for longest-match precedence and
+for ``Allow`` winning ties, and never mistakes a removed ``Allow`` or a
+wildcard interaction for a no-op. The result is one of:
+
+-   ``"equivalent"``: both versions allow exactly the same paths;
+-   ``"different"``: ``path`` is a shortest path on which the versions
+    disagree, with its actual outcome under each version;
+-   ``"undetermined"``: the state budget (``max_states``) ran out before a
+    verdict could be proven — this is never reported as ``"equivalent"``.
+
+Paths are compared in normalized form: percent-encoded spellings of the same
+character are equivalent (``%41`` is ``A``), while ``%2F`` stays an escape.
+Any character not used by the rules is represented by a single fresh
+character, so a reported path may contain a placeholder for an arbitrary
+character. The comparison covers plain path literals, ``*`` wildcards and
+trailing ``$`` anchors, and treats ``/robots.txt`` itself as always allowed.
+
+
 Comparison
 ==========
 

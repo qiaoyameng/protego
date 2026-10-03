@@ -2,6 +2,17 @@
 Protego changelog
 =================
 
+Unreleased
+==========
+
+-   Added ``compare_policies()``, which compares the crawl policies of two
+    ``robots.txt`` versions for a given user agent. It compiles the rules of
+    each version into finite automata and explores their product, so it
+    either proves the versions equivalent or returns a shortest path on
+    which they disagree, along with its actual outcome under each version.
+    The exploration is bounded by a state budget, and exhausting it is
+    reported as ``"undetermined"`` rather than ``"equivalent"``.
+
 0.7.0 (2026-09-21)
 ==================
 
