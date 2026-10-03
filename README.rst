@@ -89,6 +89,45 @@ Using Protego with Requests_:
 .. _Requests: https://3.python-requests.org/
 
 
+Comparing robots.txt versions
+=============================
+
+Before publishing a new ``robots.txt``, you can prove whether the new
+file forbids (or permits) any path that the old one did not, instead of
+trying a sample list of URLs and hoping it is representative:
+
+.. code-block:: pycon
+
+    >>> from protego import Protego
+    >>> old = Protego.parse("User-agent: *\nDisallow: /api/\nAllow: /api/public\n")
+    >>> new = Protego.parse("User-agent: *\nDisallow: /api/\nAllow: /api/public$\n")
+    >>> diff = old.compare_policy(new, "mybot")
+    >>> diff.status
+    'different'
+    >>> diff.path, diff.old_allowed, diff.new_allowed
+    ('/api/public/', True, False)
+
+The new ``$`` anchor does not change the verdict on any URL that a
+sample list derived from the rules themselves would contain
+(``/api/``, ``/api/public``); the difference hides one character past
+the rule literal, at ``/api/public/``, which the old file allows and
+the new one forbids.
+
+``compare_policy()`` considers every rule — literal prefixes, ``*``
+wildcards and trailing ``$`` anchors — with the same precedence as
+matching (longest pattern wins, ``Allow`` wins ties), and compares
+paths in the same normalized form as ``can_fetch()`` (percent-encoding
+normalized, so e.g. ``/café`` and ``/caf%C3%A9`` compare equal). The
+result is one of:
+
+*   ``"equivalent"``: both files allow and disallow exactly the same
+    paths for the user agent.
+*   ``"different"``: a shortest differing path is reported, with the
+    verdict of each version on it.
+*   ``"unproven"``: the state budget (``max_states``) ran out before
+    the search finished; the files may or may not be equivalent.
+
+
 Comparison
 ==========
 
@@ -211,6 +250,16 @@ Methods
     ``User-Agent`` header value, such as ``"Mozilla/5.0 (compatible;
     mybot/1.0)"``; a group applies when its product token appears in
     *user_agent* at a token boundary.
+
+*   ``compare_policy(other, user_agent, *, max_states=100000)`` Prove
+    whether this ``Protego`` instance (the old version) and *other* (the
+    new version) allow and disallow exactly the same paths for
+    *user_agent*, and return a ``PolicyDiff`` named tuple ``(status,
+    path, old_allowed, new_allowed, states_explored)``. ``status`` is
+    ``"equivalent"``, ``"different"`` (with a shortest differing path in
+    normalized form and the verdict of each version on it) or
+    ``"unproven"`` (the *max_states* budget ran out). See "Comparing
+    robots.txt versions" above.
 
 *   ``crawl_delay(user_agent)`` Return the crawl delay specified for the user
     agent as a float. If nothing is specified, return ``None``.

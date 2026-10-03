@@ -2,6 +2,18 @@
 Protego changelog
 =================
 
+(unreleased)
+============
+
+-   Added ``Protego.compare_policy()``, which proves whether two
+    ``robots.txt`` versions allow and disallow exactly the same paths
+    for a given user agent, instead of sampling URLs. It considers
+    literal prefixes, ``*`` wildcards and trailing ``$`` anchors with
+    longest-pattern precedence and allow-wins ties, returns the shortest
+    differing path with the verdict of each version when the policies
+    differ, and reports ``"unproven"`` when the configurable state
+    budget (``max_states``) runs out.
+
 0.7.0 (2026-09-21)
 ==================
 

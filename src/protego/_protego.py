@@ -4,6 +4,7 @@ import logging
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
+from ._compare import _DEFAULT_MAX_STATES, PolicyDiff, compare_rule_sets
 from ._ruleset import RequestRate, VisitTime, _RuleSet
 
 if TYPE_CHECKING:
@@ -267,6 +268,34 @@ class Protego:
         if not matched_rule_set:
             return True
         return matched_rule_set.can_fetch(url)
+
+    def compare_policy(
+        self,
+        other: Protego,
+        user_agent: str,
+        *,
+        max_states: int = _DEFAULT_MAX_STATES,
+    ) -> PolicyDiff:
+        """Compare the crawl policy that *self* (the old version) and
+        *other* (the new version) enforce for *user_agent*.
+
+        Unlike sampling a list of URLs with :meth:`can_fetch`, this proves
+        whether both versions allow and disallow exactly the same paths,
+        considering every rule: literal prefixes, "*" wildcards and
+        trailing "$" anchors, with longest-pattern precedence and
+        allow-wins ties. The comparison happens in the same normalized
+        path space as :meth:`can_fetch`; see :mod:`protego._compare` for
+        the supported character domain and percent-encoding rules.
+
+        Return a :class:`PolicyDiff`. If its status is ``"different"``,
+        its path is a shortest path on which the versions disagree, e.g.
+        one the new version newly forbids, along with the verdict of each
+        version on it. If the state budget *max_states* runs out first,
+        the status is ``"unproven"`` rather than ``"equivalent"``.
+        """
+        old_rule_set = self._get_matching_rule_set(user_agent)
+        new_rule_set = other._get_matching_rule_set(user_agent)
+        return compare_rule_sets(old_rule_set, new_rule_set, max_states)
 
     def crawl_delay(self, user_agent: str) -> float | None:
         """Return the crawl delay specified for the user agent as a float.
