@@ -89,6 +89,31 @@ Using Protego with Requests_:
 .. _Requests: https://3.python-requests.org/
 
 
+Rule index
+==========
+
+A robots.txt group usually carries many plain prefix rules and only a few
+exact or wildcard ones. Rather than scanning every rule of the matched group
+for each URL, Protego builds an index for the group on its first query and
+reuses it afterwards.
+
+*   Plain prefix rules and the first parts of wildcard rules share a character
+    trie; exact rules are stored in a hash table keyed by the full path.
+*   One walk of the URL visits only the prefixes it actually starts with and
+    the wildcard rules whose first part it starts with, plus at most one exact
+    lookup. The candidates still go through the usual precedence together, so
+    a longer wildcard can beat a prefix the walk reached earlier.
+*   Building the index costs ``O(S)`` time and space, where ``S`` is the total
+    length of the group's pattern text; trie edges store one character each,
+    shared prefixes are stored once, and no candidate URL is ever generated.
+*   A hot query costs one ``O(|url|)`` trie walk, one hash lookup, and the
+    full comparison of the wildcard candidates the walk meets, which is
+    independent of the number of plain prefix and exact rules.
+*   The index is per group: user-agent names that map to the same group share
+    it, while different crawlers keep separate indexes that never exchange
+    rules. Groups nobody queries never build one.
+
+
 Comparison
 ==========
 

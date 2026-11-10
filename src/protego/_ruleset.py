@@ -4,7 +4,8 @@ import logging
 import math
 from typing import TYPE_CHECKING, NamedTuple
 
-from ._urlpattern import _PREFIX, _can_fetch, _FlatRule, _URLPattern
+from ._index import _RuleIndex
+from ._urlpattern import _FlatRule, _URLPattern
 from ._utils import _hexescape, _parse_time_period, _quote_path, _quote_pattern
 
 if TYPE_CHECKING:
@@ -39,9 +40,8 @@ class _RuleSet:
     def __init__(self, parser_instance: Protego):
         self.user_agent: str | None = None
         self._rules: list[_Rule] = []
-        self._plain_prefixes: tuple[str, ...] | None = None
         self._flat_rules: list[_FlatRule] = []
-        self._special_rules: list[_FlatRule] = []
+        self._index: _RuleIndex | None = None
         self._crawl_delay: float | None = None
         self._req_rate: RequestRate | None = None
         self._visit_time: VisitTime | None = None
@@ -106,40 +106,46 @@ class _RuleSet:
             key=lambda r: (r.value.priority, r.field == "allow"), reverse=True
         )
 
-    def _build_index(self) -> tuple[str, ...]:
-        """Flatten the rules for the match loop, and split out the patterns
-        that can only match as a prefix of a URL and the rules that can match
-        otherwise.
+    def _build_index(self) -> _RuleIndex:
+        """Flatten the rules and build their index.
 
-        Built on the first match rather than at parse time because a
-        robots.txt declares many rule sets and a crawler queries one.
+        This runs on the first match of the group rather than at parse time:
+        a robots.txt declares many rule sets and a crawler usually queries one
+        or two of them, so groups nobody asks for never pay for an index. The
+        index is built once per group and then shared by every query against
+        it, including queries made under different user-agent names that map
+        to the same group.
         """
-        prefixes = []
-        flat_rules = []
-        special = []
-        for rule in self._rules:
-            pattern = rule.value
-            flat_rule = (pattern.kind, pattern.data, rule.field == "disallow")
-            flat_rules.append(flat_rule)
-            if pattern.kind == _PREFIX:
-                prefixes.append(pattern._pattern)
-            else:
-                special.append(flat_rule)
+        flat_rules = [
+            (
+                rule.value.kind,
+                rule.value.data,
+                rule.field == "disallow",
+            )
+            for rule in self._rules
+        ]
+        index = _RuleIndex(flat_rules)
         self._flat_rules = flat_rules
-        self._special_rules = special
-        self._plain_prefixes = tuple(prefixes)
-        return self._plain_prefixes
+        self._index = index
+        return index
+
+    def can_fetch_with_check_count(self, url: str) -> tuple[bool, int]:
+        """As :meth:`can_fetch`, but also report the number of rule checks
+        the index performed. Intended for tests and benchmarks.
+        """
+        url = _quote_path(url)
+        index = self._index
+        if index is None:
+            index = self._build_index()
+        return index.match_with_check_count(url)
 
     def can_fetch(self, url: str) -> bool:
         """Return if the url can be fetched."""
         url = _quote_path(url)
-        # A plain pattern matches only as a prefix of the URL, so a single
-        # startswith over all of them rules every one of them out at once.
-        prefixes = self._plain_prefixes
-        if prefixes is None:
-            prefixes = self._build_index()
-        rules = self._flat_rules if url.startswith(prefixes) else self._special_rules
-        return _can_fetch(rules, url)
+        index = self._index
+        if index is None:
+            index = self._build_index()
+        return index.match(url)
 
     @property
     def crawl_delay(self) -> float | None:

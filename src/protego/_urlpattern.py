@@ -49,35 +49,31 @@ class _URLPattern:
         return pattern.split("*"), ends_with_dollar
 
 
-def _can_fetch(rules: list[_FlatRule], url: str) -> bool:
-    """Return whether *url* may be fetched according to *rules*, the first
-    matching rule deciding.
+def _rule_matches(kind: int, data: Any, url: str) -> bool:
+    """Return whether one flattened rule matches *url*.
+
+    The prefix and the exact comparisons are decided by the index itself
+    while it walks the URL, so this helper is only called on wildcard rules
+    there; it still implements every kind so that a plain sequential scan can
+    be written on top of it.
     """
-    for kind, data, is_disallow in rules:
-        if kind == _PREFIX:
-            if not url.startswith(data):
-                continue
-        elif kind == _EXACT:
-            if url != data:
-                continue
-        else:
-            first, first_length, middle, last, last_length, anchored = data
-            if not url.startswith(first):
-                continue
-            pos = first_length
-            for part, part_length in middle:
-                index = url.find(part, pos)
-                if index == -1:
-                    pos = -1
-                    break
-                pos = index + part_length
-            if pos == -1:
-                continue
-            if anchored:
-                end = len(url) - last_length
-                if end < pos or url[end:] != last:
-                    continue
-            elif last and url.find(last, pos) == -1:
-                continue
-        return not is_disallow
+    if kind == _PREFIX:
+        return url.startswith(data)
+    if kind == _EXACT:
+        return url == data
+
+    first, first_length, middle, last, last_length, anchored = data
+    if not url.startswith(first):
+        return False
+    pos = first_length
+    for part, part_length in middle:
+        index = url.find(part, pos)
+        if index == -1:
+            return False
+        pos = index + part_length
+    if anchored:
+        end = len(url) - last_length
+        return end >= pos and url[end:] == last
+    if last and url.find(last, pos) == -1:
+        return False
     return True

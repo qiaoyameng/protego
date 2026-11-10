@@ -2,6 +2,23 @@
 Protego changelog
 =================
 
+0.7.1 (unreleased)
+==================
+
+-   ``can_fetch()`` now matches through a per-user-agent rule index instead
+    of scanning the group's rule list. Plain prefix rules and the first parts
+    of wildcard rules share a character trie, exact rules use a hash table,
+    and the three kinds still arbitrate together by the same longest-pattern,
+    allow-on-tie precedence. A wildcard cannot be shadowed by a prefix found
+    earlier in the walk, empty first parts and consecutive stars still work,
+    and the ``index.html`` special case is unchanged.
+
+-   The index is built lazily on the first query of a group and reused for
+    every later query, including queries made under user-agent names that map
+    to the same group; each group keeps its own index, so rules never leak
+    across crawlers. Its space is linear in the total length of the group's
+    pattern text, and no possible URL is ever materialized.
+
 0.7.0 (2026-09-21)
 ==================
 
