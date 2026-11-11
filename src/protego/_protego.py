@@ -305,3 +305,42 @@ class Protego:
     def preferred_host(self) -> str | None:
         """Get the preferred host."""
         return self._host
+
+    def to_text(self) -> str:
+        """Return a normalized ``robots.txt`` of the parsed rules.
+
+        The output is deterministic and covers the effective user agent
+        groups, their allow and disallow rules, and the ``Crawl-delay``,
+        ``Request-rate``, ``Visit-time``, ``Sitemap`` and ``Host``
+        directives. Directive names are spelled in their canonical form
+        and URL patterns in their normalized encoding, so parsing the
+        output back yields the same decisions for any user agent and URL
+        and the same time policies, and serializing that parse returns
+        the same text byte for byte.
+
+        This is a normalized view, not a faithful copy of the input:
+        comments, blank lines, unknown and malformed directives, and the
+        original spelling of directives and values are not preserved.
+        Keep the original string around if you need it verbatim.
+        """
+        lines: list[str] = []
+        for sitemap in self._sitemap_list:
+            lines.append(f"Sitemap: {sitemap}")
+        if self._host is not None:
+            lines.append(f"Host: {self._host}")
+        for rule_set in self._user_agents.values():
+            user_agent = rule_set.user_agent
+            if user_agent is None or ("*" in user_agent and user_agent != "*"):
+                # The parser keeps a user agent containing wildcards both as
+                # written and with the wildcards removed; the second spelling
+                # is the one every query matches, so it is the one emitted.
+                continue
+            if lines:
+                # Groups only end at a user agent line following another
+                # directive; a blank line or a consecutive user agent line
+                # would merge them. An empty Disallow sets the preceding
+                # directive without adding a rule, since empty-valued rules
+                # are ignored by the parser.
+                lines.append("Disallow:")
+            lines.extend(rule_set._to_text_lines())
+        return "\n".join(lines) + "\n" if lines else ""

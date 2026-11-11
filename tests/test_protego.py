@@ -1522,3 +1522,221 @@ def test_utf8_bom(prefix, rule_applies):
     content = "User-agent: *\nDisallow: /private\n"
     parsed = Protego.parse(prefix + content)
     assert parsed.can_fetch("/private", "anybot") is not rule_applies
+
+
+class TestToText:
+    def test_normalizes_directives(self):
+        content = (
+            "User-agent: FooBot\n"
+            "Disallow: /disallowed\n"
+            "Allow: /allowed\n"
+            "Crawl-delay: 10\n"
+        )
+        rp = Protego.parse(content)
+        assert rp.to_text() == (
+            "User-agent: foobot\n"
+            "Disallow: /disallowed\n"
+            "Allow: /allowed\n"
+            "Crawl-delay: 10.0\n"
+        )
+
+    def test_normalizes_url_encoding(self):
+        content = (
+            "User-agent: FooBot\n"
+            "Disallow: /foo/bar/%62%61%7A\n"
+            "Allow: /foo/bar/ツ\n"
+            "Disallow: /a b\n"
+        )
+        rp = Protego.parse(content)
+        assert rp.to_text() == (
+            "User-agent: foobot\n"
+            "Allow: /foo/bar/%E3%83%84\n"
+            "Disallow: /foo/bar/baz\n"
+            "Disallow: /a%20b\n"
+        )
+
+    def test_sitemaps_and_host(self):
+        content = (
+            "User-agent: *\n"
+            "Disallow: /a\n"
+            "Sitemap: https://site.local/sitemap.xml\n"
+            "Sitemap: https://site.local/sitemap2.xml\n"
+            "Host: https://site.local\n"
+        )
+        rp = Protego.parse(content)
+        assert rp.to_text() == (
+            "Sitemap: https://site.local/sitemap.xml\n"
+            "Sitemap: https://site.local/sitemap2.xml\n"
+            "Host: https://site.local\n"
+            "Disallow:\n"
+            "User-agent: *\n"
+            "Disallow: /a\n"
+        )
+
+    def test_extensions(self):
+        content = (
+            "User-agent: *\n"
+            "Crawl-delay: 5\n"
+            "Request-rate: 100/15m 1820-1940\n"
+            "Visit-time: 0400-0845\n"
+        )
+        rp = Protego.parse(content)
+        assert rp.to_text() == (
+            "User-agent: *\n"
+            "Crawl-delay: 5.0\n"
+            "Request-rate: 100/900s 1820-1940\n"
+            "Visit-time: 0400-0845\n"
+        )
+
+    def test_empty(self):
+        assert Protego.parse("").to_text() == ""
+
+    def test_site_wide_only(self):
+        content = "Sitemap: https://site.local/sitemap.xml\nHost: site.local\n"
+        rp = Protego.parse(content)
+        assert rp.to_text() == (
+            "Sitemap: https://site.local/sitemap.xml\nHost: site.local\n"
+        )
+
+    def test_unknown_and_malformed_dropped(self):
+        content = (
+            "User-agent: *\n"
+            "Harry: Potter\n"
+            "Crawl-delay: nope\n"
+            "Request-rate: one/two\n"
+            "Visit-time: 9-17\n"
+            "Disallow: /a\n"
+        )
+        rp = Protego.parse(content)
+        assert rp.to_text() == "User-agent: *\nDisallow: /a\n"
+
+    def test_empty_group_kept(self):
+        """A group without rules is an allow-all group and must survive,
+        since dropping it would make its user agent fall back to '*'."""
+        content = "User-agent: *\nDisallow: /a\nUser-agent: empty\n"
+        rp = Protego.parse(content)
+        assert rp.to_text() == (
+            "User-agent: *\nDisallow: /a\nDisallow:\nUser-agent: empty\n"
+        )
+        normalized = Protego.parse(rp.to_text())
+        assert normalized.can_fetch("https://site.local/a", "empty")
+        assert not normalized.can_fetch("https://site.local/a", "other")
+
+    def test_derived_rules_not_dumped(self):
+        """The allow rule derived from an allowed index.html is internal
+        state, not an input rule, and parsing the output derives it again."""
+        content = "User-agent: *\nAllow: /dir/index.html\nDisallow: /\n"
+        rp = Protego.parse(content)
+        text = rp.to_text()
+        assert text == "User-agent: *\nAllow: /dir/index.html\nDisallow: /\n"
+        normalized = Protego.parse(text)
+        assert normalized.can_fetch("https://site.local/dir/", "bot")
+        assert normalized.can_fetch("https://site.local/dir/index.html", "bot")
+        assert not normalized.can_fetch("https://site.local/dir/other", "bot")
+
+    def test_duplicate_rules_collapse(self):
+        """Exact duplicates collapse into one rule; the first occurrence of
+        a pattern decides, so no decision changes."""
+        content = (
+            "User-agent: FooBot\n"
+            "Disallow: /a\n"
+            "Disallow: /a\n"
+            "Allow: /a$\n"
+        )
+        rp = Protego.parse(content)
+        text = rp.to_text()
+        assert text.count("Disallow: /a\n") == 1
+        normalized = Protego.parse(text)
+        for url in (
+            "https://site.local/a",
+            "https://site.local/a/b",
+            "https://site.local/ab",
+        ):
+            assert rp.can_fetch(url, "FooBot") == normalized.can_fetch(url, "FooBot")
+
+    def test_byte_stable(self):
+        """Serializing a parse of the output returns the same text byte for
+        byte, including with duplicate user agents, dollar signs and
+        comments in the input."""
+        content = (
+            "# leading comment\n"
+            "User-agent: FooBot\n"
+            "Disallow: /a  # trailing comment\n"
+            "Disallow: /a\n"
+            "User-agent: FooBot\n"
+            "Disallow: /x$/abc\n"
+            "Allow: /foo$\n"
+            "Disallow: /foo\n"
+        )
+        text = Protego.parse(content).to_text()
+        assert Protego.parse(text).to_text() == text
+
+    def test_round_trip_decisions(self):
+        """Parsing the output back yields the same decisions for any user
+        agent and URL, and the same time policies."""
+        content = (
+            "User-agent: one\n"
+            "User-agent: two\n"
+            "Disallow: /shared\n"
+            "User-agent: FooBot\n"
+            "Disallow: /\n"
+            "Allow: /public$\n"
+            "Allow: /dir/index.html\n"
+            "Crawl-delay: 2.5\n"
+            "Request-rate: 100/15m 1820-1940\n"
+            "Visit-time: 0400-0845\n"
+            "User-agent: *\n"
+            "Disallow: /default\n"
+            "Sitemap: https://site.local/sitemap.xml\n"
+            "Host: https://site.local\n"
+        )
+        original = Protego.parse(content)
+        normalized = Protego.parse(original.to_text())
+        user_agents = [
+            "one",
+            "two",
+            "foobot",
+            "Mozilla/5.0 (compatible; Foobot/1.0)",
+            "unlisted",
+            "*",
+            "",
+        ]
+        urls = [
+            "https://site.local/shared",
+            "https://site.local/public",
+            "https://site.local/dir/",
+            "https://site.local/dir/index.html",
+            "https://site.local/default",
+            "https://site.local/other",
+            "https://site.local/robots.txt",
+        ]
+        for user_agent in user_agents:
+            for url in urls:
+                assert original.can_fetch(url, user_agent) == normalized.can_fetch(
+                    url, user_agent
+                )
+            assert original.crawl_delay(user_agent) == normalized.crawl_delay(
+                user_agent
+            )
+            assert original.request_rate(user_agent) == normalized.request_rate(
+                user_agent
+            )
+            assert original.visit_time(user_agent) == normalized.visit_time(
+                user_agent
+            )
+        assert list(original.sitemaps) == list(normalized.sitemaps)
+        assert original.preferred_host == normalized.preferred_host
+
+    def test_wildcard_user_agent_spelling(self):
+        """A user agent with wildcards is stored under both its spelling
+        and the wildcard-free one; the normalized output keeps the
+        wildcard-free spelling, the one queries match."""
+        content = "User-agent: Mediapartners-Google*\nDisallow: /a\n"
+        rp = Protego.parse(content)
+        text = rp.to_text()
+        assert text == "User-agent: mediapartners-google\nDisallow: /a\n"
+        normalized = Protego.parse(text)
+        assert not normalized.can_fetch(
+            "https://site.local/a", "Mediapartners-Google"
+        )
+        assert Protego.parse(text).to_text() == text

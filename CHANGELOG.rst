@@ -2,6 +2,21 @@
 Protego changelog
 =================
 
+0.8.0 (unreleased)
+==================
+
+-   Added ``Protego.to_text()``, which serializes the parsed rules back to a
+    normalized, deterministic ``robots.txt``. It keeps the effective user
+    agent groups, their ``Allow``/``Disallow`` rules and the ``Crawl-delay``,
+    ``Request-rate``, ``Visit-time``, ``Sitemap`` and ``Host`` directives,
+    with canonical directive spellings and normalized URL encoding. Parsing
+    the output again yields the same decisions and time policies, and a
+    second serialization returns the same text byte for byte. Rules derived
+    while parsing, such as the directory rule implied by an allowed
+    ``index.html``, are not emitted. Comments and the original spelling of
+    directives and values are not preserved; keep the original string if you
+    need it verbatim.
+
 0.7.0 (2026-09-21)
 ==================
 

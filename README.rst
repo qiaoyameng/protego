@@ -71,6 +71,29 @@ Usage
    'http://example.co.in'
 
 
+You can serialize the parsed rules back to a normalized ``robots.txt`` with
+``to_text()``. The output is deterministic: parsing it again gives the same
+decisions for any user agent and URL, and serializing that parse returns the
+same text byte for byte. It is a normalized view, not a copy of the input, so
+comments and the original spelling of directives and values are not kept:
+
+.. code-block:: pycon
+
+   >>> print(rp.to_text())
+   Sitemap: http://example.com/sitemap-index.xml
+   Host: http://example.co.in
+   Disallow:
+   User-agent: *
+   Disallow: /account/contact%24
+   Disallow: /account/*/profile
+   Disallow: /account/contact$
+   Allow: /account
+   Allow: /about
+   Disallow: /
+   Crawl-delay: 4.0
+   Request-rate: 10/60s
+
+
 Using Protego with Requests_:
 
 .. code-block:: pycon

@@ -28,9 +28,35 @@ class VisitTime(NamedTuple):
     end_time: time
 
 
+def _format_time_of_day(value: time) -> str:
+    """Format a time of day as HHMM, the spelling that the visit-time and
+    request-rate parsers read."""
+    return f"{value.hour:02d}{value.minute:02d}"
+
+
+def _format_request_rate(request_rate: RequestRate) -> str:
+    """Format a request rate as "<requests>/<seconds>s[ HHMM-HHMM]"."""
+    value = f"{request_rate.requests}/{request_rate.seconds}s"
+    if request_rate.start_time is not None and request_rate.end_time is not None:
+        value += (
+            f" {_format_time_of_day(request_rate.start_time)}"
+            f"-{_format_time_of_day(request_rate.end_time)}"
+        )
+    return value
+
+
+def _format_visit_time(visit_time: VisitTime) -> str:
+    """Format a visit time as "HHMM-HHMM"."""
+    return (
+        f"{_format_time_of_day(visit_time.start_time)}"
+        f"-{_format_time_of_day(visit_time.end_time)}"
+    )
+
+
 class _Rule(NamedTuple):
     field: str
     value: _URLPattern
+    derived: bool = False
 
 
 class _RuleSet:
@@ -91,7 +117,11 @@ class _RuleSet:
             # Add the rule directly; going through allow() would treat the
             # "$" anchor as a literal dollar sign too.
             self._rules.append(
-                _Rule(field="allow", value=_URLPattern(quoted.removesuffix(page) + "$"))
+                _Rule(
+                    field="allow",
+                    value=_URLPattern(quoted.removesuffix(page) + "$"),
+                    derived=True,
+                )
             )
 
     def disallow(self, pattern: str) -> None:
@@ -105,6 +135,37 @@ class _RuleSet:
         self._rules.sort(
             key=lambda r: (r.value.priority, r.field == "allow"), reverse=True
         )
+
+    def _to_text_lines(self) -> list[str]:
+        """Return the normalized robots.txt lines for this rule set.
+
+        Rules derived while parsing, such as the directory rule added for
+        an allowed "index.html", are left out: parsing the output derives
+        them again. Exact duplicates of a rule collapse into one, which
+        does not change any decision since the first occurrence of a
+        pattern decides.
+        """
+        lines: list[str] = []
+        seen = set()
+        for rule in self._rules:
+            if rule.derived:
+                continue
+            line = f"{rule.field.capitalize()}: {rule.value._pattern}"
+            if line in seen:
+                continue
+            seen.add(line)
+            lines.append(line)
+        if self._crawl_delay is not None:
+            lines.append(f"Crawl-delay: {self._crawl_delay}")
+        if self._req_rate is not None:
+            lines.append(f"Request-rate: {_format_request_rate(self._req_rate)}")
+        if self._visit_time is not None:
+            lines.append(f"Visit-time: {_format_visit_time(self._visit_time)}")
+        # A header-only group parses back as an allow-all group, so keep it
+        # even when every directive line was empty, unknown or malformed.
+        assert self.user_agent is not None
+        header = f"User-agent: {self.user_agent.strip()}"
+        return [header, *lines]
 
     def _build_index(self) -> tuple[str, ...]:
         """Flatten the rules for the match loop, and split out the patterns
