@@ -89,6 +89,38 @@ Using Protego with Requests_:
 .. _Requests: https://3.python-requests.org/
 
 
+Comparing two versions of a robots.txt
+======================================
+
+Before rolling out a new ``robots.txt``, you can ask how its fetch decisions
+for a given user agent differ from the ones of the version in force:
+
+.. code-block:: pycon
+
+   >>> from protego import Protego
+   >>> current = Protego.parse("User-agent: *\nDisallow: /tmp\n")
+   >>> updated = Protego.parse("User-agent: *\nDisallow: /tmp$\n")
+   >>> result = current.compare(updated, "mybot")
+   >>> result.kind
+   <ChangeKind.LOOSER: 'looser'>
+   >>> result.newly_allowed
+   ('http://robotstxt-witness.invalid/tmpx', 'http://robotstxt-witness.invalid/tmp/x')
+
+The result classifies the change as ``equivalent``, ``stricter``, ``looser``,
+``mixed`` (both directions changed) or ``unknown``, and lists witness URLs for
+every direction of change found: ``newly_blocked`` URLs that the update would
+stop allowing, and ``newly_allowed`` URLs that it would start allowing. Every
+witness is verified with ``can_fetch()`` on both versions, so you can confirm
+it yourself.
+
+Both versions are queried through ``can_fetch()``, so agent group selection,
+percent-encoding and rule precedence are identical to a live fetch decision.
+Paths are sampled from the patterns the two versions actually contain. If the
+``budget`` of URL evaluations (2000 by default) is not enough to exhaust the
+sampled paths, the result is ``unknown`` with an explanatory ``reason``
+instead of a classification based on partial evidence.
+
+
 Comparison
 ==========
 

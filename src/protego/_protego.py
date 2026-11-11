@@ -4,6 +4,7 @@ import logging
 from typing import TYPE_CHECKING, Self
 from urllib.parse import urlparse
 
+from ._compare import ComparisonResult, compare_policies
 from ._ruleset import RequestRate, VisitTime, _RuleSet
 
 if TYPE_CHECKING:
@@ -267,6 +268,22 @@ class Protego:
         if not matched_rule_set:
             return True
         return matched_rule_set.can_fetch(url)
+
+    def compare(
+        self, other: Protego, user_agent: str, *, budget: int = 2000
+    ) -> ComparisonResult:
+        """Compare the fetch decisions of this policy with another one.
+
+        ``self`` is the policy in force and ``other`` the candidate
+        replacement. The result classifies the change for ``user_agent`` as
+        equivalent, stricter, looser, mixed or unknown, and lists witness URLs
+        for every direction of change found. Both policies are queried through
+        :meth:`can_fetch`, so agent group selection, percent-encoding and rule
+        precedence are identical to a live fetch decision. If ``budget`` URL
+        evaluations are not enough to exhaust the sampled paths, the result is
+        :data:`ChangeKind.UNKNOWN` with an explanatory reason.
+        """
+        return compare_policies(self, other, user_agent, budget=budget)
 
     def crawl_delay(self, user_agent: str) -> float | None:
         """Return the crawl delay specified for the user agent as a float.

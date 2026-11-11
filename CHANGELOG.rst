@@ -2,6 +2,16 @@
 Protego changelog
 =================
 
+Unreleased
+==========
+
+-   Added ``Protego.compare()``, which compares the fetch decisions of two
+    robots.txt versions for a user agent and classifies the change as
+    equivalent, stricter, looser, mixed or unknown. Each direction of change
+    comes with witness URLs that are verified with ``can_fetch()`` on both
+    versions. When the evaluation budget is exhausted before the sampled paths
+    are covered, the result is ``unknown`` with a reason.
+
 0.7.0 (2026-09-21)
 ==================
 
