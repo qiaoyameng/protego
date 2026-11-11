@@ -2,6 +2,24 @@
 Protego changelog
 =================
 
+0.8.0 (unreleased)
+==================
+
+-   Added ``RobotsTxtManager``, a stateful robots.txt manager that applies
+    the fetch-time rules of RFC 9309 on top of the parser: HTTP status code
+    handling (200, 304, 4xx, 5xx/429, network failures), caching and
+    revalidation with a 24-hour default lifetime, ``Retry-After`` support,
+    and redirect following capped at five hops.
+
+    Fetching stays out of Protego: the manager takes an injected fetch
+    callback and an injected clock, so no network client dependency is
+    added. State is isolated per origin (scheme, host and effective port),
+    and a redirect's final address never changes which origin a policy
+    belongs to. Decisions report their status, the policy version in force
+    and whether a stale policy is being used, and an origin whose robots.txt
+    could never be established reports ``unknown`` instead of being silently
+    treated as crawlable.
+
 0.7.0 (2026-09-21)
 ==================
 
