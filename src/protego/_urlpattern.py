@@ -49,9 +49,45 @@ class _URLPattern:
         return pattern.split("*"), ends_with_dollar
 
 
+def _rule_matches(kind: int, data: Any, url: str) -> bool:
+    """Return whether a single flat rule matches *url*.
+
+    This is the shared comparison behind both the hot match loop and the
+    explanation scans; the two must never disagree.
+    """
+    if kind == _PREFIX:
+        return url.startswith(data)
+    if kind == _EXACT:
+        return url == data
+    first, first_length, middle, last, last_length, anchored = data
+    if not url.startswith(first):
+        return False
+    pos = first_length
+    for part, part_length in middle:
+        index = url.find(part, pos)
+        if index == -1:
+            return False
+        pos = index + part_length
+    if anchored:
+        end = len(url) - last_length
+        return end >= pos and url[end:] == last
+    return not last or url.find(last, pos) != -1
+
+
+def _match(rules: list[_FlatRule], url: str) -> int | None:
+    """Return the index of the first rule matching *url*, or None."""
+    for rule_index, (kind, data, _is_disallow) in enumerate(rules):
+        if _rule_matches(kind, data, url):
+            return rule_index
+    return None
+
+
 def _can_fetch(rules: list[_FlatRule], url: str) -> bool:
     """Return whether *url* may be fetched according to *rules*, the first
-    matching rule deciding.
+    matching rule deciding. The loop is kept fully inlined because this is
+    the hottest path; :func:`_rule_matches` and :func:`_match` implement the
+    same comparisons for callers that need the matching rule itself, and
+    must be kept in sync with this loop.
     """
     for kind, data, is_disallow in rules:
         if kind == _PREFIX:

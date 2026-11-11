@@ -3,6 +3,7 @@ from datetime import time
 import pytest
 
 from protego import Protego
+from protego._urlpattern import _can_fetch, _rule_matches
 from protego._utils import _parse_time_period, _quote_path, _quote_pattern
 
 
@@ -1522,3 +1523,225 @@ def test_utf8_bom(prefix, rule_applies):
     content = "User-agent: *\nDisallow: /private\n"
     parsed = Protego.parse(prefix + content)
     assert parsed.can_fetch("/private", "anybot") is not rule_applies
+
+
+class TestExplainFetch:
+    RULE_TABLE = """# a short rule table
+User-agent: foobot
+Disallow: /admin/
+Allow: /admin/index.html
+Disallow: /account/*/profile
+Allow: /account/*/profile$
+Disallow: /cost$
+Disallow: /a%2fb.html
+
+User-agent: *
+Disallow: /
+"""
+
+    def test_explain_matches_can_fetch_on_every_rule(self):
+        rp = Protego.parse(content=self.RULE_TABLE)
+        cases = [
+            ("/admin/index.html", "foobot", True),
+            ("/admin/settings", "foobot", False),
+            ("/account/me/profile", "foobot", True),
+            ("/account/me/profile/extra", "foobot", False),
+            ("/cost", "foobot", False),
+            ("/cost$", "foobot", False),
+            ("/costly", "foobot", True),
+            ("/a%2fb.html", "foobot", False),
+            ("/a/b.html", "foobot", True),
+            ("/anything", "Mozilla/5.0 (compatible; Foobot/1.0)", True),
+            ("/anything", "other-bot", False),
+            ("/robots.txt", "foobot", True),
+        ]
+        for url, user_agent, expected in cases:
+            assert rp.can_fetch(url, user_agent) is expected
+            explanation = rp.explain_fetch(url, user_agent)
+            assert explanation.allowed is expected
+            assert explanation.allowed is rp.can_fetch(url, user_agent)
+
+    def test_winner_points_at_source_line_and_text(self):
+        rp = Protego.parse(content=self.RULE_TABLE)
+        explanation = rp.explain_fetch("/admin/settings", "foobot")
+        winner = explanation.winning_rule
+        assert winner is not None
+        assert winner.field == "disallow"
+        assert winner.pattern == "/admin/"
+        assert winner.is_winner is True
+        assert winner.source.line_number == 3
+        assert winner.source.line_text == "Disallow: /admin/"
+
+    def test_index_html_derivation_is_traced(self):
+        rp = Protego.parse(content=self.RULE_TABLE)
+        explanation = rp.explain_fetch("/admin/", "foobot")
+        assert explanation.allowed is True
+        winner = explanation.winning_rule
+        assert winner.pattern == "/admin/$"
+        assert winner.source.line_number == 4
+        assert winner.source.line_text == "Allow: /admin/index.html"
+        assert "index.html" in winner.source.derivation
+
+    def test_dollar_anchor_and_literal_escape_sources(self):
+        rp = Protego.parse(content=self.RULE_TABLE)
+        anchored = rp.explain_fetch("/cost", "foobot")
+        assert anchored.winning_rule.pattern == "/cost$"
+        assert anchored.winning_rule.source.line_number == 7
+
+        literal = rp.explain_fetch("/cost$", "foobot")
+        assert literal.winning_rule.pattern == "/cost%24"
+        assert "%24" in literal.winning_rule.source.derivation
+        assert literal.winning_rule.source.line_number == 7
+
+    def test_wildcard_rules_match_through_real_matcher(self):
+        rp = Protego.parse(content=self.RULE_TABLE)
+        allowed = rp.explain_fetch("/account/me/profile", "foobot")
+        assert allowed.winning_rule.pattern == "/account/*/profile$"
+        assert allowed.allowed is True
+        assert any(
+            rule.pattern == "/account/*/profile" for rule in allowed.other_rules
+        )
+
+        disallowed = rp.explain_fetch("/account/me/profile/extra", "foobot")
+        assert disallowed.winning_rule.pattern == "/account/*/profile"
+        assert disallowed.allowed is False
+
+    def test_escape_normalization_is_explained(self):
+        rp = Protego.parse(content=self.RULE_TABLE)
+        explanation = rp.explain_fetch(
+            "https://site.local/a%2fb.html", "foobot"
+        )
+        assert explanation.normalized_url == "/a%2Fb.html"
+        assert explanation.winning_rule.source.line_number == 8
+        assert any("percent" in note for note in explanation.normalization)
+        assert any("path" in note for note in explanation.normalization)
+
+    def test_user_agent_group_selection(self):
+        rp = Protego.parse(content=self.RULE_TABLE)
+        named = rp.explain_fetch("/x", "Mozilla (compatible; Foobot/2.0)")
+        assert named.user_agent_explanation.group == "foobot"
+        assert named.user_agent_explanation.match_score == 6
+        assert ("foobot", 6) in named.user_agent_explanation.candidates
+        assert ("*", 1) in named.user_agent_explanation.candidates
+
+        wildcard = rp.explain_fetch("/x", "unknown-bot")
+        assert wildcard.user_agent_explanation.group == "*"
+        assert wildcard.winning_rule.pattern == "/"
+        assert wildcard.winning_rule.source.line_number == 11
+
+    def test_no_matching_group_defaults_to_allow(self):
+        rp = Protego.parse("User-agent: foobot\nDisallow: /\n")
+        explanation = rp.explain_fetch("/x", "other-bot")
+        assert explanation.allowed is True
+        assert explanation.winning_rule is None
+        assert explanation.user_agent_explanation.group is None
+        assert "default rule" in explanation.reason
+
+    def test_no_rule_matches_defaults_to_allow(self):
+        rp = Protego.parse("User-agent: *\nDisallow: /private\n")
+        explanation = rp.explain_fetch("/public", "*")
+        assert explanation.allowed is True
+        assert explanation.winning_rule is None
+        assert "no rule" in explanation.reason
+
+    def test_equal_length_allow_wins_and_is_explained(self):
+        rp = Protego.parse(
+            "User-agent: *\nDisallow: /x/a\nAllow: /x/a\n"
+        )
+        explanation = rp.explain_fetch("/x/a", "*")
+        assert explanation.allowed is True
+        assert explanation.winning_rule.field == "allow"
+        assert "tie" in explanation.reason
+        assert explanation.other_rules[0].field == "disallow"
+
+    def test_duplicate_user_agent_groups_merge(self):
+        rp = Protego.parse(
+            "User-agent: foo\nDisallow: /a\n\n"
+            "User-agent: foo\nDisallow: /b\n"
+        )
+        explanation = rp.explain_fetch("/b", "foo")
+        assert len(explanation.user_agent_explanation.candidates) == 1
+        assert explanation.winning_rule.source.line_number == 5
+        assert explanation.winning_rule.source.line_text == "Disallow: /b"
+
+    def test_other_rules_budget_truncates(self):
+        nested = ("/*", "/p/*", "/p/0/*", "/p/0/x/*", "/p/0/x/y/*", "/p/0/x/y/z/*")
+        content = (
+            "User-agent: *\n"
+            + "\n".join(f"Disallow: {pattern}" for pattern in nested)
+        )
+        rp = Protego.parse(content)
+        explanation = rp.explain_fetch("/p/0/x/y/z/q", "*", other_rules_budget=2)
+        assert len(explanation.other_rules) == 2
+        assert explanation.other_rules_truncated is True
+
+        full = rp.explain_fetch("/p/0/x/y/z/q", "*", other_rules_budget=10)
+        assert full.other_rules_truncated is False
+
+    def test_existing_index_still_decides(self):
+        rp = Protego.parse(
+            "User-agent: *\nDisallow: /admin/\nDisallow: /tmp\n"
+        )
+        rp.can_fetch("/admin/index.html", "*")
+        assert rp._get_matching_rule_set("*")._plain_prefixes is not None
+        explanation = rp.explain_fetch("/admin/index.html", "*")
+        assert explanation.allowed is False
+        assert explanation.winning_rule.pattern == "/admin/"
+        assert explanation.allowed is rp.can_fetch("/admin/index.html", "*")
+
+    def test_robots_txt_is_always_allowed(self):
+        rp = Protego.parse(content=self.RULE_TABLE)
+        explanation = rp.explain_fetch(
+            "https://site.local/robots.txt", "foobot"
+        )
+        assert explanation.allowed is True
+        assert explanation.robots_txt_allowed is True
+        assert explanation.winning_rule is None
+
+    def test_rendered_text_contains_line_and_pattern(self):
+        rp = Protego.parse(content=self.RULE_TABLE)
+        text = rp.explain_fetch("/admin/settings", "foobot").to_text()
+        assert "line 3" in text
+        assert "Disallow: /admin/" in text
+        assert "Decision: disallow" in text
+
+    def test_negative_budget_is_rejected(self):
+        rp = Protego.parse(content=self.RULE_TABLE)
+        with pytest.raises(ValueError, match="non-negative"):
+            rp.explain_fetch("/x", "*", other_rules_budget=-1)
+
+
+def test_explain_predicate_agrees_with_the_hot_loop():
+    content = """User-agent: *
+Disallow: /admin/
+Disallow: /tmp$
+Disallow: /*.pdf
+Disallow: /a/*/b$
+Allow: /a/
+"""
+    rp = Protego.parse(content)
+    rule_set = rp._get_matching_rule_set("*")
+    rule_set._build_index()
+    urls = [
+        "/admin/index.html",
+        "/tmp",
+        "/tmp/x",
+        "/docs/manual.pdf",
+        "/a/1/2/b",
+        "/a/1/2/b/c",
+        "/other",
+    ]
+    for url in urls:
+        normalized = _quote_path(url)
+        rules, index_rules = rule_set._select_rules(normalized)
+        first_match = None
+        for position, rule in enumerate(rules):
+            kind, data, is_disallow = rule
+            if _rule_matches(kind, data, normalized):
+                first_match = position
+                break
+        if first_match is None:
+            assert _can_fetch(rules, normalized) is True
+        else:
+            assert _can_fetch(rules, normalized) is (not rules[first_match][2])
+            assert index_rules[first_match].source.line_number >= 1

@@ -4,7 +4,14 @@ import logging
 from typing import TYPE_CHECKING, Self
 from urllib.parse import urlparse
 
+from ._explain import (
+    DEFAULT_OTHER_RULES_BUDGET,
+    FetchExplanation,
+    RuleSource,
+    UserAgentExplanation,
+)
 from ._ruleset import RequestRate, VisitTime, _RuleSet
+from ._utils import _quote_path
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -142,6 +149,9 @@ class Protego:
         for line in lines:
             self._total_line_seen += 1
 
+            # The raw line, kept so that rules can point back at their source.
+            raw_line = line.strip()
+
             # Remove the comment portion of the line
             hash_pos = line.find("#")
             if hash_pos != -1:
@@ -213,12 +223,14 @@ class Protego:
                         current_rule_sets.append(rule_set)
 
             elif field in _ALLOW_DIRECTIVE:
+                source = RuleSource(self._total_line_seen, raw_line)
                 for rule_set in current_rule_sets:
-                    rule_set.allow(value)
+                    rule_set.allow(value, source)
 
             elif field in _DISALLOW_DIRECTIVE:
+                source = RuleSource(self._total_line_seen, raw_line)
                 for rule_set in current_rule_sets:
-                    rule_set.disallow(value)
+                    rule_set.disallow(value, source)
 
             elif field in _SITEMAP_DIRECTIVE:
                 self._sitemap_list.append(value)
@@ -259,6 +271,75 @@ class Protego:
         self._matched_rule_set[user_agent] = matched_rule_set
         return matched_rule_set
 
+    def _explain_user_agent(self, user_agent: str) -> UserAgentExplanation:
+        """Explain which user agent group a query resolves to.
+
+        The group itself is decided by :meth:`_get_matching_rule_set`, the
+        same selection that :meth:`can_fetch` uses; this method only adds
+        the reasoning around it.
+        """
+        matched_rule_set = self._get_matching_rule_set(user_agent)
+        candidates = tuple(
+            (rule_set.user_agent or "", rule_set.applies_to(user_agent))
+            for rule_set in self._user_agents.values()
+        )
+        if matched_rule_set is None:
+            reason = (
+                "no group's product token matches this user agent; "
+                "the default rule applies"
+            )
+            return UserAgentExplanation(user_agent, None, 0, candidates, reason)
+
+        assert matched_rule_set.user_agent is not None
+        group = matched_rule_set.user_agent
+        score = matched_rule_set.applies_to(user_agent)
+        tied = [
+            name
+            for name, candidate_score in candidates
+            if candidate_score == score and name != group
+        ]
+        if group == "*":
+            reason = (
+                "the wildcard group '*' is the only match (score 1); "
+                "an unnamed crawler falls back to it"
+            )
+        elif tied:
+            reason = (
+                f"group '{group}' ties on the longest product-token match "
+                f"(score {score}) with {', '.join(repr(name) for name in tied)}; "
+                "the earliest declared group wins"
+            )
+        else:
+            reason = (
+                f"product token '{group}' is the longest match in this user "
+                f"agent at a token boundary (score {score}), so its group wins"
+            )
+        return UserAgentExplanation(user_agent, group, score, candidates, reason)
+
+    @staticmethod
+    def _normalization_notes(url: str, normalized: str) -> tuple[str, ...]:
+        """Describe how a URL was normalized before rule matching."""
+        notes: list[str] = []
+        if "://" in url:
+            notes.append(
+                "the scheme, host and fragment are dropped; only the path "
+                "and query are matched"
+            )
+        elif not url.startswith("/"):
+            notes.append("a relative URL is taken to start at the site root")
+        if urlparse(url).fragment:
+            notes.append("the fragment is dropped; rules never match against it")
+        if "%" in url:
+            notes.append(
+                "percent-escapes are decoded and re-encoded canonically so "
+                "equivalent spellings compare equal"
+            )
+        if not notes and url != normalized:
+            notes.append(
+                "the URL is percent-encoded for comparison against rule patterns"
+            )
+        return tuple(notes)
+
     def can_fetch(self, url: str, user_agent: str) -> bool:
         """Return True if the user agent can fetch the URL, otherwise return False."""
         if "/robots.txt" in url and urlparse(url).path == "/robots.txt":
@@ -267,6 +348,94 @@ class Protego:
         if not matched_rule_set:
             return True
         return matched_rule_set.can_fetch(url)
+
+    def explain_fetch(
+        self,
+        url: str,
+        user_agent: str,
+        *,
+        other_rules_budget: int = DEFAULT_OTHER_RULES_BUDGET,
+    ) -> FetchExplanation:
+        """Explain why :meth:`can_fetch` gives the answer it gives.
+
+        The returned :class:`FetchExplanation` reports the user agent group
+        that applies, the rule that decided the outcome with the number and
+        text of its source line, and the other rules that also match the URL
+        (capped at *other_rules_budget*). The winning rule is the one the
+        real match loop picks, so the decision is always identical to
+        :meth:`can_fetch` for the same arguments.
+        """
+        if other_rules_budget < 0:
+            raise ValueError("other_rules_budget must be non-negative")
+        normalized_url = _quote_path(url)
+        normalization = self._normalization_notes(url, normalized_url)
+        if "/robots.txt" in url and urlparse(url).path == "/robots.txt":
+            return FetchExplanation(
+                url,
+                user_agent,
+                allowed=True,
+                normalized_url=normalized_url,
+                normalization=normalization,
+                reason="robots.txt itself is always fetchable, "
+                "no rules are consulted",
+                robots_txt_allowed=True,
+            )
+
+        agent_explanation = self._explain_user_agent(user_agent)
+        matched_rule_set = self._get_matching_rule_set(user_agent)
+        if matched_rule_set is None:
+            return FetchExplanation(
+                url,
+                user_agent,
+                allowed=True,
+                normalized_url=normalized_url,
+                normalization=normalization,
+                user_agent_explanation=agent_explanation,
+                reason="no user agent group applies, so the default rule "
+                "allows the fetch",
+            )
+
+        normalized_url, winner, others, truncated = matched_rule_set.explain(
+            url, other_rules_budget
+        )
+        if winner is None:
+            reason = (
+                "no rule in the group matches the URL, so the default rule "
+                "allows the fetch"
+            )
+            allowed = True
+        else:
+            allowed = winner.field == "allow"
+            kind = "Allow" if allowed else "Disallow"
+            tied_disallow = any(
+                other.field == "disallow"
+                and len(other.pattern) == len(winner.pattern)
+                for other in others
+            )
+            if allowed and tied_disallow:
+                reason = (
+                    "rules are tried longest-pattern first; "
+                    f"'{winner.pattern}' ties on length with a Disallow "
+                    "match, and at equal length Allow wins"
+                )
+            else:
+                reason = (
+                    "rules are tried longest-pattern first; "
+                    f"'{winner.pattern}' is the first match, and it is "
+                    f"a {kind} rule"
+                )
+        return FetchExplanation(
+            url,
+            user_agent,
+            allowed=allowed,
+            normalized_url=normalized_url,
+            normalization=normalization,
+            user_agent_explanation=agent_explanation,
+            winning_rule=winner,
+            reason=reason,
+            other_rules=tuple(others),
+            other_rules_truncated=truncated,
+        )
 
     def crawl_delay(self, user_agent: str) -> float | None:
         """Return the crawl delay specified for the user agent as a float.

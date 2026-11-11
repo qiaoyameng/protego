@@ -2,6 +2,17 @@
 Protego changelog
 =================
 
+(unreleased)
+============
+
+-   Added ``Protego.explain_fetch(url, user_agent)``, which returns a
+    ``FetchExplanation`` describing how ``can_fetch()`` reaches its decision
+    for the same arguments: the user agent group that applies, the winning
+    rule with the number and text of its source line (including rules
+    derived from ``$`` anchors and the ``index.html`` convention), the other
+    matching rules up to a configurable budget, and the reason for the
+    decision.
+
 0.7.0 (2026-09-21)
 ==================
 

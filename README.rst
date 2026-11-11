@@ -61,6 +61,23 @@ Usage
    False
    >>> rp.can_fetch("http://example.com/account/contact", "mybot")
    False
+   >>> print(rp.explain_fetch(
+   ...     "http://example.com/account/contact", "mybot"
+   ... ).to_text())
+   URL: http://example.com/account/contact
+   User-agent: mybot
+   Decision: disallow
+   Normalized URL: /account/contact
+     - the scheme, host and fragment are dropped; only the path and query are matched
+   User-agent group: *
+     - the wildcard group '*' is the only match (score 1); an unnamed crawler falls back to it
+     - group scores: *=1
+   Winning rule: Disallow: /account/contact$ (line 6)
+     source: Disallow: /account/contact$
+   Reason: rules are tried longest-pattern first; '/account/contact$' is the first match, and it is a Disallow rule
+   Other matching rules:
+     - Allow: /account (line 5)
+     - Disallow: / (line 3)
    >>> rp.crawl_delay("mybot")
    4.0
    >>> rp.request_rate("mybot")
@@ -211,6 +228,22 @@ Methods
     ``User-Agent`` header value, such as ``"Mozilla/5.0 (compatible;
     mybot/1.0)"``; a group applies when its product token appears in
     *user_agent* at a token boundary.
+
+*   ``explain_fetch(url, user_agent, *, other_rules_budget=10)`` Return a
+    ``FetchExplanation`` describing how ``can_fetch()`` reaches its decision
+    for the same arguments. The decision in the explanation is always
+    identical to what ``can_fetch()`` returns: the winning rule is the one
+    the real match loop picks, and the other matches are found with the same
+    per-rule comparison, not a simplified matcher.
+
+    The explanation includes the user agent group that applies and why, the
+    winning rule with the number and text of its source line in
+    ``robots.txt`` (rules derived from ``$`` anchors and the ``index.html``
+    convention point back at the line they came from, with a note on how
+    they were derived), the other rules that also matched the URL (capped at
+    *other_rules_budget*, with a truncation flag when the cap hides further
+    matches), and a human-readable reason. ``FetchExplanation.to_text()``
+    renders all of it as plain text.
 
 *   ``crawl_delay(user_agent)`` Return the crawl delay specified for the user
     agent as a float. If nothing is specified, return ``None``.
