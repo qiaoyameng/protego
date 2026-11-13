@@ -89,6 +89,42 @@ Using Protego with Requests_:
 .. _Requests: https://3.python-requests.org/
 
 
+Scheduling
+==========
+
+Protego also ships an optional, passive reservation scheduler. Given an
+origin and the policy of a selected user agent, it computes the earliest
+moment at which a request would satisfy ``Crawl-delay``, the sliding
+``Request-rate`` and ``Visit-time`` simultaneously. It never sleeps and
+never performs requests itself; all moments are explicit UTC, and
+time-of-day windows may cross midnight.
+
+.. code-block:: pycon
+
+   >>> from datetime import datetime, timedelta, timezone
+   >>> from protego import Policy, Protego, ReservationScheduler
+   >>> rp = Protego.parse(robotstxt)
+   >>> now = datetime(2026, 1, 1, 8, 30, tzinfo=timezone.utc)
+   >>> scheduler = ReservationScheduler(clock=lambda: now)
+   >>> scheduler.set_policy("example.com", Policy.from_protego(rp, "mybot", version=1))
+   True
+   >>> reservation = scheduler.reserve("example.com", user_agent="mybot")
+   >>> reservation.scheduled_at
+   datetime.datetime(2026, 1, 1, 8, 30, tzinfo=datetime.timezone.utc)
+   >>> scheduler.reserve("example.com", user_agent="mybot").scheduled_at
+   datetime.datetime(2026, 1, 1, 8, 30, 4, tzinfo=datetime.timezone.utc)
+
+Reservations are ``PENDING`` until ``start()`` marks them as ``STARTED``
+or ``cancel()`` marks them as ``CANCELLED``. Cancelling a pending
+reservation frees its moment, while cancelling a started one does not
+reclaim the quota of the request that already happened. Reservations on
+the same origin never receive conflicting moments, and unexecuted
+reservations are revalidated whenever the policy of the origin changes,
+including a bare version bump. When no moment qualifies within the search
+horizon, lookups return an explicit unavailable ``Slot`` instead of
+searching the future forever.
+
+
 Comparison
 ==========
 

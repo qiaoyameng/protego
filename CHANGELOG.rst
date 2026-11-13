@@ -2,6 +2,21 @@
 Protego changelog
 =================
 
+(unreleased)
+============
+
+-   Added an optional, passive reservation scheduler
+    (``protego.ReservationScheduler``) that computes, per origin and per
+    selected user agent, the earliest moment satisfying ``Crawl-delay``,
+    the sliding ``Request-rate`` and ``Visit-time`` simultaneously, with
+    UTC time-of-day windows that may cross midnight. Reservations move
+    through ``pending``, ``started`` and ``cancelled`` states; cancelling
+    a started reservation does not reclaim the quota of the request that
+    already happened, concurrent reservations on one origin never receive
+    conflicting moments, and unexecuted reservations are revalidated when
+    the policy version changes. Slot lookups are bounded by a search
+    horizon and report an explicit unavailable result instead of looping.
+
 0.7.0 (2026-09-21)
 ==================
 
