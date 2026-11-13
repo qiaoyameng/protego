@@ -89,6 +89,37 @@ Using Protego with Requests_:
 .. _Requests: https://3.python-requests.org/
 
 
+Comparing two policies
+======================
+
+Before rolling out a new ``robots.txt`` you can check, for a given user agent,
+whether it changes any URL the agent could previously fetch. The comparison
+runs over the whole normalized URL path space using deterministic automata
+(path wildcards and the trailing ``$`` anchor), applies the same agent group
+selection, percent-escaping and length-based rule precedence as
+``can_fetch``, and does not rely on a hand-picked or random list of URLs::
+
+   >>> from protego import compare_robotstxt
+   >>> old = "User-agent: *\nDisallow: /a\nAllow: /b\n"
+   >>> new = "User-agent: *\nAllow: /a\nDisallow: /b\n"
+   >>> result = compare_robotstxt(old, new, "mybot")
+   >>> result.relation.value
+   'both'
+   >>> for witness in result.witnesses:
+   ...     print(witness.url, witness.old_allowed, witness.new_allowed)
+   https://comparison.invalid/b True False
+   https://comparison.invalid/a False True
+
+``relation`` is one of ``equivalent``, ``stricter``, ``looser`` (the new
+policy only blocks or only opens paths), ``both`` (paths move in both
+directions), or ``unknown`` (the analysis could not finish inside the budget;
+``unknown_reason`` then explains why). A witness is only reported after the
+real ``can_fetch`` confirms it on both policies, so "no witness found" is never
+confused with equivalence. Pass a custom :class:`ComparisonBudget` to cap the
+size of the automata, or use :func:`compare_policies` with two already parsed
+:class:`Protego` objects.
+
+
 Comparison
 ==========
 

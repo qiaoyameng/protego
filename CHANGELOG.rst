@@ -2,6 +2,20 @@
 Protego changelog
 =================
 
+0.8.0 (unreleased)
+===================
+
+-   Added ``compare_policies()`` and ``compare_robotstxt()`` together with
+    the ``Relation``, ``PolicyComparison``, ``Witness`` and
+    ``ComparisonBudget`` types. They decide whether a new robots.txt policy
+    is equivalent to, stricter than, looser than, or different in both
+    directions from an existing one for a given user agent, or whether the
+    answer cannot be determined within a budget. The analysis models the
+    whole normalized URL path space (path wildcards and the trailing ``$``
+    anchor) with deterministic automata, reuses the agent group selection,
+    escaping and rule precedence of ``can_fetch``, and verifies every
+    reported witness with ``can_fetch`` on both policies.
+
 0.7.0 (2026-09-21)
 ==================
 
