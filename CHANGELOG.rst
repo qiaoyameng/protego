@@ -2,6 +2,23 @@
 Protego changelog
 =================
 
+(unreleased)
+============
+
+-   Added ``RobotsManager``, an independent ``robots.txt`` fetching and
+    caching manager.  HTTP access and time are injected by the caller, so
+    Protego still has no network client dependency.
+
+-   The manager isolates state by scheme, host, and effective port; supports
+    conditional ``304`` revalidation, ``404``/other ``4xx`` unavailable
+    semantics, and ``5xx``/network-unreachable fallback to a cached policy.
+    An initial unreachable result is reported as unknown rather than as an
+    unconditional allow.
+
+-   Redirects are followed up to a configurable limit, including cross-origin
+    redirects.  The final address is reported but never replaces the original
+    origin as the cache key.
+
 0.7.0 (2026-09-21)
 ==================
 

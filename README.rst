@@ -89,6 +89,77 @@ Using Protego with Requests_:
 .. _Requests: https://3.python-requests.org/
 
 
+Managed fetching and caching
+============================
+
+``RobotsManager`` adds the fetching and caching side of `RFC 9309`_ without
+adding an HTTP client dependency to Protego.  The caller injects both the HTTP
+callback and the clock, so the manager is easy to integrate with any client
+and can be tested without waiting for wall-clock time:
+
+.. code-block:: pycon
+
+   >>> from protego import RobotsManager, RobotsResponse
+   >>> def fetch(request):
+   ...     # request is a RobotsRequest: use request.headers for
+   ...     # If-None-Match / If-Modified-Since when they are present.
+   ...     return RobotsResponse(
+   ...         200,
+   ...         "User-agent: *\nDisallow: /private\n",
+   ...         {"ETag": '"v1"'},
+   ...         "https://example.com/robots.txt",
+   ...     )
+   >>> manager = RobotsManager(fetch, clock=lambda: 0.0)
+   >>> decision = manager.decision("https://example.com/private", "mybot")
+   >>> decision.decision
+   <Decision.DISALLOW: 'disallow'>
+   >>> decision.version
+   '"v1"'
+   >>> decision.stale
+   False
+
+The fetch callback may take either a :class:`RobotsRequest` or a URL; the
+manager inspects its signature and passes conditional validators when the
+callback accepts them.  A result may be a :class:`RobotsResponse`, a
+requests-style object, a mapping, or a tuple.  The optional final URL in a
+result describes the address reached after redirects, but the cache is always
+keyed by the original ``(scheme, host, effective port)``.  A redirect to
+another origin therefore cannot replace the identity of the origin whose
+policy is being stored.
+
+The state rules are explicit:
+
+*   ``2xx``: parse the body and store it with its ``ETag`` /
+    ``Last-Modified`` validators (or a content hash when neither is present).
+*   ``304``: reuse the stored policy and refresh its validation time; the
+    stored version is reported unchanged.
+*   ``4xx``: ``robots.txt`` is unavailable, so everything is allowed.  This
+    availability state is cached like a successful result.
+*   ``5xx`` or a network error: ``robots.txt`` is temporarily unreachable.
+    A stored policy is reused (and marked ``stale``); without a stored policy
+    the decision is ``UNKNOWN``, never an unconditional allow.
+*   A successful fetch or ``304`` resets the failure count.  Repeated failures
+    keep using the same stored policy and increment ``consecutive_failures``.
+
+The default cache lifetime is 24 hours after the last successful fetch or
+revalidation.  A stale policy is revalidated conditionally; if revalidation
+fails, the previous policy continues to apply.  ``RobotsDecision.stale`` says
+whether that policy was reused after a failed refresh (or is older than the
+cache lifetime), ``fallback`` says whether it was used because the refresh
+failed, and ``version`` reports the policy version actually used.
+
+Redirects are followed for at least five consecutive hops; more than five
+hops, a missing ``Location`` header, or a redirect loop is treated as
+unreachable.  Cross-origin redirects are followed, but their content applies
+to the original origin only.  A callback that follows redirects internally
+can report the final address and the number of redirects in its result.
+
+State is isolated by scheme, host, and effective port.  ``http`` defaults to
+port 80 and ``https`` to port 443, so ``http://example.com`` and
+``http://example.com:80`` share an entry, while a different scheme or an
+explicit non-default port (for example ``:8080``) has its own entry.
+
+
 Comparison
 ==========
 
@@ -222,3 +293,24 @@ Methods
 *   ``visit_time(user_agent)`` Return the visit time specified for the user
     agent as a named tuple ``VisitTime(start_time, end_time)``.
     If nothing is specified, return ``None``.
+
+Class ``protego.RobotsManager``:
+
+*   ``RobotsManager(fetch, clock, ...)`` Create a manager.  ``fetch`` is the
+    injectable HTTP callback and ``clock`` is a callable returning seconds or
+    a ``datetime``.  ``cache_ttl`` defaults to 86400 seconds and
+    ``max_redirects`` to 5.
+
+*   ``decision(url, user_agent)`` Return a ``RobotsDecision`` with the current
+    ``decision`` (``ALLOW``, ``DISALLOW``, or ``UNKNOWN``), the adopted
+    ``version``, and the ``stale`` flag.  A fresh cache is used without a
+    fetch.
+
+*   ``fetch(url)`` / ``refresh(url)`` Force a conditional fetch or
+    revalidation.  ``update(url)`` fetches only when the entry is absent or
+    stale.
+
+*   ``predicate`` helpers: ``allowed`` is ``True``, ``False``, or ``None``;
+    ``can_fetch()`` returns the same result object (truthy only for an allow).
+    The result also exposes ``policy``, ``state``, ``status``, ``final_url``,
+    ``fetched_at``, ``consecutive_failures``, and ``revision``.
