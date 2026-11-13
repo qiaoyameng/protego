@@ -212,6 +212,12 @@ Methods
     mybot/1.0)"``; a group applies when its product token appears in
     *user_agent* at a token boundary.
 
+*   ``explain_fetch(url, user_agent, max_other_matches=10)`` Return a named
+    tuple ``FetchExplanation`` with the same verdict ``can_fetch()`` would
+    give, plus why: the adopted user-agent group, the winning rule with its
+    line number and source text, further matching rules (truncated past
+    *max_other_matches*), and a human-readable reason.
+
 *   ``crawl_delay(user_agent)`` Return the crawl delay specified for the user
     agent as a float. If nothing is specified, return ``None``.
 

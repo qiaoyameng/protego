@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, NamedTuple, Self
 from urllib.parse import urlparse
 
-from ._ruleset import RequestRate, VisitTime, _RuleSet
+from ._ruleset import RequestRate, RuleMatch, VisitTime, _RuleSet
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -46,6 +46,21 @@ _ALL_DIRECTIVES = (
 )
 
 _MAX_DIRECTIVE_WORDS = max(len(alias.split()) for alias in _ALL_DIRECTIVES)
+
+
+class FetchExplanation(NamedTuple):
+    """Why :meth:`Protego.can_fetch` allows or disallows a fetch."""
+
+    url: str
+    user_agent: str
+    allowed: bool
+    reason: str
+    matched_user_agent: str | None  # product token of the adopted group
+    # (line number, raw line) of the declarations of the adopted group
+    user_agent_lines: tuple[tuple[int, str], ...]
+    winning_rule: RuleMatch | None  # the rule that decided the outcome
+    other_matches: tuple[RuleMatch, ...]  # further rules that also match
+    truncated: bool  # whether more rules matched than other_matches shows
 
 
 def _is_valid_directive_field(field: str) -> bool:
@@ -142,6 +157,10 @@ class Protego:
         for line in lines:
             self._total_line_seen += 1
 
+            # The line as written, before comment and whitespace stripping,
+            # so that rules can point back to their source.
+            raw_line = line
+
             # Remove the comment portion of the line
             hash_pos = line.find("#")
             if hash_pos != -1:
@@ -211,14 +230,21 @@ class Protego:
                         rule_set.user_agent = ua
                         self._user_agents[ua] = rule_set
                         current_rule_sets.append(rule_set)
+                    rule_set.user_agent_lines.append(
+                        (self._total_line_seen, raw_line)
+                    )
 
             elif field in _ALLOW_DIRECTIVE:
                 for rule_set in current_rule_sets:
-                    rule_set.allow(value)
+                    rule_set.allow(
+                        value, line=self._total_line_seen, raw=raw_line
+                    )
 
             elif field in _DISALLOW_DIRECTIVE:
                 for rule_set in current_rule_sets:
-                    rule_set.disallow(value)
+                    rule_set.disallow(
+                        value, line=self._total_line_seen, raw=raw_line
+                    )
 
             elif field in _SITEMAP_DIRECTIVE:
                 self._sitemap_list.append(value)
@@ -267,6 +293,81 @@ class Protego:
         if not matched_rule_set:
             return True
         return matched_rule_set.can_fetch(url)
+
+    def explain_fetch(
+        self, url: str, user_agent: str, max_other_matches: int | None = 10
+    ) -> FetchExplanation:
+        """Return why :meth:`can_fetch` allows or disallows *url* for
+        *user_agent*.
+
+        The decision is the one :meth:`can_fetch` makes, reached through the
+        same matching process; the explanation only reports on it: the
+        user-agent group adopted, the rule that won, and the robots.txt
+        lines both come from. Up to *max_other_matches* further matching
+        rules are reported in ``other_matches`` (``None`` for no limit);
+        ``truncated`` tells whether more rules matched than reported.
+        """
+        if "/robots.txt" in url and urlparse(url).path == "/robots.txt":
+            return FetchExplanation(
+                url=url,
+                user_agent=user_agent,
+                allowed=True,
+                reason="The URL is the robots.txt file itself, which is "
+                "always allowed (RFC 9309).",
+                matched_user_agent=None,
+                user_agent_lines=(),
+                winning_rule=None,
+                other_matches=(),
+                truncated=False,
+            )
+        matched_rule_set = self._get_matching_rule_set(user_agent)
+        if not matched_rule_set:
+            return FetchExplanation(
+                url=url,
+                user_agent=user_agent,
+                allowed=True,
+                reason=f"No user-agent group applies to {user_agent!r}; "
+                "allowed by default.",
+                matched_user_agent=None,
+                user_agent_lines=(),
+                winning_rule=None,
+                other_matches=(),
+                truncated=False,
+            )
+        allowed, winner, others, truncated, allow_tie, quoted_url = (
+            matched_rule_set.explain(url, max_other_matches)
+        )
+        ua_lines = tuple(matched_rule_set.user_agent_lines)
+        group = f"user-agent group {matched_rule_set.user_agent!r}"
+        if len(ua_lines) > 1:
+            lines = ", ".join(str(line) for line, _ in ua_lines)
+            group += f" (merged from the declarations on lines {lines})"
+        if winner is None:
+            reason = (
+                f"No allow or disallow rule of {group} matches "
+                f"{quoted_url!r}; allowed by default."
+            )
+        else:
+            verdict = "Allowed" if allowed else "Disallowed"
+            reason = f"{verdict} by the {winner.field} rule from line {winner.line} of {group}."
+            if winner.derived_from:
+                reason += f" The winning rule was auto-derived: {winner.derived_from}."
+            if allow_tie:
+                reason += (
+                    " A disallow rule of the same priority also matches; "
+                    "allow takes precedence."
+                )
+        return FetchExplanation(
+            url=url,
+            user_agent=user_agent,
+            allowed=allowed,
+            reason=reason,
+            matched_user_agent=matched_rule_set.user_agent,
+            user_agent_lines=ua_lines,
+            winning_rule=winner,
+            other_matches=others,
+            truncated=truncated,
+        )
 
     def crawl_delay(self, user_agent: str) -> float | None:
         """Return the crawl delay specified for the user agent as a float.

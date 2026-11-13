@@ -4,7 +4,7 @@ import logging
 import math
 from typing import TYPE_CHECKING, NamedTuple
 
-from ._urlpattern import _PREFIX, _can_fetch, _FlatRule, _URLPattern
+from ._urlpattern import _PREFIX, _can_fetch, _FlatRule, _matches, _URLPattern
 from ._utils import _hexescape, _parse_time_period, _quote_path, _quote_pattern
 
 if TYPE_CHECKING:
@@ -28,9 +28,32 @@ class VisitTime(NamedTuple):
     end_time: time
 
 
+class RuleMatch(NamedTuple):
+    """A rule that matched a URL, with a pointer to its source."""
+
+    field: str  # "allow" or "disallow"
+    pattern: str  # the normalized pattern that was matched against
+    line: int | None  # 1-based line number in the robots.txt
+    raw: str | None  # the robots.txt line the rule comes from
+    derived_from: str | None  # how the rule was auto-derived, if it was
+
+
 class _Rule(NamedTuple):
     field: str
     value: _URLPattern
+    line: int | None = None
+    raw: str | None = None
+    derived_from: str | None = None
+
+
+def _rule_match(rule: _Rule) -> RuleMatch:
+    return RuleMatch(
+        field=rule.field,
+        pattern=rule.value._pattern,
+        line=rule.line,
+        raw=rule.raw,
+        derived_from=rule.derived_from,
+    )
 
 
 class _RuleSet:
@@ -38,10 +61,14 @@ class _RuleSet:
 
     def __init__(self, parser_instance: Protego):
         self.user_agent: str | None = None
+        # (line number, raw line) of every user-agent declaration naming
+        # this rule set; more than one entry means groups were merged.
+        self.user_agent_lines: list[tuple[int, str]] = []
         self._rules: list[_Rule] = []
         self._plain_prefixes: tuple[str, ...] | None = None
         self._flat_rules: list[_FlatRule] = []
         self._special_rules: list[_FlatRule] = []
+        self._special_sources: list[int] = []
         self._crawl_delay: float | None = None
         self._req_rate: RequestRate | None = None
         self._visit_time: VisitTime | None = None
@@ -77,12 +104,31 @@ class _RuleSet:
             cache[pattern] = _URLPattern(_quote_pattern(pattern))
         return cache[pattern]
 
-    def allow(self, pattern: str) -> None:
+    def allow(
+        self,
+        pattern: str,
+        line: int | None = None,
+        raw: str | None = None,
+        derived_from: str | None = None,
+    ) -> None:
         if "$" in pattern:
-            self.allow(pattern.replace("$", _hexescape("$")))
+            self.allow(
+                pattern.replace("$", _hexescape("$")),
+                line=line,
+                raw=raw,
+                derived_from=f'"$" of {pattern!r} escaped as {_hexescape("$")!r}',
+            )
 
         url_pattern = self._url_pattern(pattern)
-        self._rules.append(_Rule(field="allow", value=url_pattern))
+        self._rules.append(
+            _Rule(
+                field="allow",
+                value=url_pattern,
+                line=line,
+                raw=raw,
+                derived_from=derived_from,
+            )
+        )
 
         # If index.html is allowed, we interpret this as / being allowed too.
         page = "index.html"
@@ -91,15 +137,40 @@ class _RuleSet:
             # Add the rule directly; going through allow() would treat the
             # "$" anchor as a literal dollar sign too.
             self._rules.append(
-                _Rule(field="allow", value=_URLPattern(quoted.removesuffix(page) + "$"))
+                _Rule(
+                    field="allow",
+                    value=_URLPattern(quoted.removesuffix(page) + "$"),
+                    line=line,
+                    raw=raw,
+                    derived_from=f"allowing {quoted!r} also allows its parent",
+                )
             )
 
-    def disallow(self, pattern: str) -> None:
+    def disallow(
+        self,
+        pattern: str,
+        line: int | None = None,
+        raw: str | None = None,
+        derived_from: str | None = None,
+    ) -> None:
         if "$" in pattern:
-            self.disallow(pattern.replace("$", _hexescape("$")))
+            self.disallow(
+                pattern.replace("$", _hexescape("$")),
+                line=line,
+                raw=raw,
+                derived_from=f'"$" of {pattern!r} escaped as {_hexescape("$")!r}',
+            )
 
         url_pattern = self._url_pattern(pattern)
-        self._rules.append(_Rule(field="disallow", value=url_pattern))
+        self._rules.append(
+            _Rule(
+                field="disallow",
+                value=url_pattern,
+                line=line,
+                raw=raw,
+                derived_from=derived_from,
+            )
+        )
 
     def finalize_rules(self) -> None:
         self._rules.sort(
@@ -117,7 +188,8 @@ class _RuleSet:
         prefixes = []
         flat_rules = []
         special = []
-        for rule in self._rules:
+        special_sources = []
+        for rule_index, rule in enumerate(self._rules):
             pattern = rule.value
             flat_rule = (pattern.kind, pattern.data, rule.field == "disallow")
             flat_rules.append(flat_rule)
@@ -125,21 +197,72 @@ class _RuleSet:
                 prefixes.append(pattern._pattern)
             else:
                 special.append(flat_rule)
+                special_sources.append(rule_index)
         self._flat_rules = flat_rules
         self._special_rules = special
+        self._special_sources = special_sources
         self._plain_prefixes = tuple(prefixes)
         return self._plain_prefixes
+
+    def _indexed_rules(self, url: str) -> tuple[list[_FlatRule], list[int] | None]:
+        """Return the flattened rules to match *url* against, in priority
+        order, and, when a subset is returned, their indices in
+        ``self._rules``.
+        """
+        prefixes = self._plain_prefixes
+        if prefixes is None:
+            prefixes = self._build_index()
+        # A plain pattern matches only as a prefix of the URL, so a single
+        # startswith over all of them rules every one of them out at once.
+        if url.startswith(prefixes):
+            # Flat rules are built in the order of self._rules.
+            return self._flat_rules, None
+        return self._special_rules, self._special_sources
 
     def can_fetch(self, url: str) -> bool:
         """Return if the url can be fetched."""
         url = _quote_path(url)
-        # A plain pattern matches only as a prefix of the URL, so a single
-        # startswith over all of them rules every one of them out at once.
-        prefixes = self._plain_prefixes
-        if prefixes is None:
-            prefixes = self._build_index()
-        rules = self._flat_rules if url.startswith(prefixes) else self._special_rules
+        rules, _ = self._indexed_rules(url)
         return _can_fetch(rules, url)
+
+    def explain(
+        self, url: str, max_other_matches: int | None = 10
+    ) -> tuple[bool, RuleMatch | None, tuple[RuleMatch, ...], bool, bool, str]:
+        """Match *url* like :meth:`can_fetch` does, and report the outcome.
+
+        Return a tuple ``(allowed, winning_rule, other_matches, truncated,
+        allow_tie, quoted_url)`` where *winning_rule* is the rule that
+        decided the outcome (``None`` when no rule matched), *other_matches*
+        are up to *max_other_matches* further rules that also match,
+        *truncated* tells whether more rules matched than reported, and
+        *allow_tie* tells whether the winning allow rule shares its priority
+        with a matching disallow rule.
+        """
+        quoted_url = _quote_path(url)
+        rules, sources = self._indexed_rules(quoted_url)
+        matched = []
+        for index, (kind, data, _) in enumerate(rules):
+            if _matches(kind, data, quoted_url):
+                matched.append(index if sources is None else sources[index])
+        if not matched:
+            return True, None, (), False, False, quoted_url
+        winner = self._rules[matched[0]]
+        others = [self._rules[index] for index in matched[1:]]
+        allow_tie = winner.field == "allow" and any(
+            other.field == "disallow" and other.value.priority == winner.value.priority
+            for other in others
+        )
+        truncated = max_other_matches is not None and len(others) > max_other_matches
+        if max_other_matches is not None:
+            others = others[:max_other_matches]
+        return (
+            winner.field == "allow",
+            _rule_match(winner),
+            tuple(_rule_match(other) for other in others),
+            truncated,
+            allow_tie,
+            quoted_url,
+        )
 
     @property
     def crawl_delay(self) -> float | None:

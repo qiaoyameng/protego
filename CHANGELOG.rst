@@ -2,6 +2,16 @@
 Protego changelog
 =================
 
+Unreleased
+==========
+
+-   Added ``Protego.explain_fetch()``, which reports the same verdict as
+    ``can_fetch()`` together with an explanation: the adopted user-agent
+    group, the winning rule with its line number and source text in the
+    ``robots.txt``, further matching rules, and a human-readable reason.
+    Auto-derived rules (e.g. from ``Allow: …/index.html`` or from escaping
+    ``$``) point back to the line they were derived from.
+
 0.7.0 (2026-09-21)
 ==================
 
