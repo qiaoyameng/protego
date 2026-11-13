@@ -204,6 +204,11 @@ Methods
 *   ``parse(robotstxt_body)`` Parse ``robots.txt`` and return a new instance of
     ``protego.Protego``.
 
+*   ``to_text()`` Return a deterministic, normalized ``robots.txt``
+    representation of the parsed groups, directives, sitemaps, host, and time
+    policies. Directive names and pattern encoding are normalized, and
+    comments are not preserved.
+
 *   ``can_fetch(url, user_agent)`` Return True if the user agent can fetch the
     URL, otherwise return ``False``.
 

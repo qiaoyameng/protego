@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Self
 from urllib.parse import urlparse
 
-from ._ruleset import RequestRate, VisitTime, _RuleSet
+from ._ruleset import (
+    RequestRate,
+    VisitTime,
+    _RuleSet,
+    _parse_crawl_delay,
+    _parse_request_rate,
+    _parse_visit_time,
+)
+from ._utils import _quote_pattern
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from datetime import time
 
     from ._urlpattern import _URLPattern
 
@@ -46,6 +56,56 @@ _ALL_DIRECTIVES = (
 )
 
 _MAX_DIRECTIVE_WORDS = max(len(alias.split()) for alias in _ALL_DIRECTIVES)
+
+_CANONICAL_DIRECTIVE_NAMES = {
+    "allow": "Allow",
+    "disallow": "Disallow",
+    "crawl-delay": "Crawl-delay",
+    "request-rate": "Request-rate",
+    "visit-time": "Visit-time",
+}
+
+
+@dataclass
+class _Group:
+    """A record group as it was read, before rules are merged by user agent."""
+
+    user_agents: list[str] = field(default_factory=list)
+    directives: list[tuple[str, str]] = field(default_factory=list)
+
+
+def _format_time_of_day(value: time) -> str:
+    return f"{value.hour:02d}{value.minute:02d}"
+
+
+def _format_directive(field_name: str, value: str) -> str | None:
+    """Return the normalized value of a group directive, or None if the
+    original value was invalid and the parser ignored it."""
+    if field_name in ("allow", "disallow"):
+        return _quote_pattern(value)
+    if field_name == "crawl-delay":
+        parsed_delay = _parse_crawl_delay(value)
+        return None if parsed_delay is None else repr(parsed_delay)
+    if field_name == "request-rate":
+        parsed_rate = _parse_request_rate(value)
+        if parsed_rate is None:
+            return None
+        formatted = f"{parsed_rate.requests}/{parsed_rate.seconds}s"
+        if parsed_rate.start_time is not None and parsed_rate.end_time is not None:
+            formatted += (
+                f" {_format_time_of_day(parsed_rate.start_time)}"
+                f"-{_format_time_of_day(parsed_rate.end_time)}"
+            )
+        return formatted
+    if field_name == "visit-time":
+        parsed_time = _parse_visit_time(value)
+        if parsed_time is None:
+            return None
+        return (
+            f"{_format_time_of_day(parsed_time.start_time)}"
+            f"-{_format_time_of_day(parsed_time.end_time)}"
+        )
+    return None
 
 
 def _is_valid_directive_field(field: str) -> bool:
@@ -109,11 +169,23 @@ class Protego:
         # A list of sitemaps specified in the robots.txt
         self._sitemap_list: list[str] = []
 
+        # Sitemap and Host directives in the order they were read. Host is
+        # single-valued in the public API, but keeping every directive lets
+        # to_text() reproduce the parser's last-one-wins behaviour.
+        self._site_wide_directives: list[tuple[str, str]] = []
+
         # A memoization table mapping user agents (used in queries) to matched rule sets.
         self._matched_rule_set: dict[str, _RuleSet | None] = {}
 
         # URL patterns by directive value, shared across rule sets.
         self._url_patterns: dict[str, _URLPattern] = {}
+
+        # Record groups as they were read, including the user agents and
+        # directives that the parser accepted. They are kept separately from
+        # the rule sets, which merge repeated user agents and drop invalid
+        # directives, so that to_text() can reproduce the parse result.
+        self._groups: list[_Group] = []
+        self._current_group: _Group | None = None
 
         self._total_line_seen = 0
         self._total_directive_seen = 0
@@ -165,6 +237,7 @@ class Protego:
                 and previous_rule_field not in _USER_AGENT_DIRECTIVE
             ):
                 current_rule_sets = []
+                self._current_group = None
 
             # Sitemap and Host are site-wide directives and don't matter for
             # record grouping.
@@ -193,6 +266,10 @@ class Protego:
                 # Wildcards are not supported in the user agent values.
                 # We will be generous here and remove all the wildcards.
                 user_agent = value.strip().lower()
+                if self._current_group is None:
+                    self._current_group = _Group()
+                    self._groups.append(self._current_group)
+                self._current_group.user_agents.append(user_agent)
                 user_agent_without_asterisk = None
                 if user_agent != "*" and "*" in user_agent:
                     user_agent_without_asterisk = user_agent.replace("*", "")
@@ -213,33 +290,91 @@ class Protego:
                         current_rule_sets.append(rule_set)
 
             elif field in _ALLOW_DIRECTIVE:
+                if self._current_group is not None:
+                    self._current_group.directives.append(("allow", value))
                 for rule_set in current_rule_sets:
                     rule_set.allow(value)
 
             elif field in _DISALLOW_DIRECTIVE:
+                if self._current_group is not None:
+                    self._current_group.directives.append(("disallow", value))
                 for rule_set in current_rule_sets:
                     rule_set.disallow(value)
 
             elif field in _SITEMAP_DIRECTIVE:
                 self._sitemap_list.append(value)
+                self._site_wide_directives.append(("sitemap", value))
 
             elif field in _CRAWL_DELAY_DIRECTIVE:
+                if self._current_group is not None:
+                    self._current_group.directives.append(("crawl-delay", value))
                 for rule_set in current_rule_sets:
                     rule_set.crawl_delay = value
 
             elif field in _REQUEST_RATE_DIRECTIVE:
+                if self._current_group is not None:
+                    self._current_group.directives.append(("request-rate", value))
                 for rule_set in current_rule_sets:
                     rule_set.request_rate = value
 
             elif field in _HOST_DIRECTIVE:
                 self._host = value
+                self._site_wide_directives.append(("host", value))
 
             elif field in _VISIT_TIME_DIRECTIVE:
+                if self._current_group is not None:
+                    self._current_group.directives.append(("visit-time", value))
                 for rule_set in current_rule_sets:
                     rule_set.visit_time = value
 
         for rule_set in self._user_agents.values():
             rule_set.finalize_rules()
+
+    def to_text(self) -> str:
+        """Return a deterministic, normalized robots.txt representation.
+
+        The result preserves the user-agent groups that the parser accepted,
+        together with the effective directives, sitemaps, host, and time
+        policies. Directive names and pattern encoding are normalized, and
+        comments and formatting are not preserved. Rules that the parser
+        derives internally, such as the directory rule added for an allowed
+        index.html, are not written out.
+        """
+        groups: list[str] = []
+        group_has_directive: list[bool] = []
+        for group in self._groups:
+            lines = [f"User-agent: {user_agent}" for user_agent in group.user_agents]
+            emitted_directive = False
+            for field_name, value in group.directives:
+                formatted = _format_directive(field_name, value)
+                if formatted is None:
+                    continue
+                lines.append(
+                    f"{_CANONICAL_DIRECTIVE_NAMES[field_name]}: {formatted}"
+                )
+                emitted_directive = True
+            groups.append("\n".join(lines))
+            group_has_directive.append(emitted_directive)
+
+        for index in range(len(groups) - 1):
+            if not group_has_directive[index]:
+                # An empty group still shadows a wildcard group. A value-less
+                # directive is ignored by the parser but reliably ends the
+                # group, so the next user agent line starts a new one.
+                groups[index] += "\nDisallow:"
+
+        site_wide_lines = []
+        for field_name, value in self._site_wide_directives:
+            if field_name == "sitemap":
+                site_wide_lines.append(f"Sitemap: {value}")
+            else:
+                site_wide_lines.append(f"Host: {value}")
+        if site_wide_lines:
+            groups.append("\n".join(site_wide_lines))
+
+        if not groups:
+            return ""
+        return "\n\n".join(groups) + "\n"
 
     def _get_matching_rule_set(self, user_agent: str) -> _RuleSet | None:
         """Return the rule set with highest matching score."""

@@ -33,6 +33,69 @@ class _Rule(NamedTuple):
     value: _URLPattern
 
 
+def _parse_crawl_delay(delay: str) -> float | None:
+    """Return the crawl delay as a float, or None if it is malformed."""
+    try:
+        parsed_delay = float(delay)
+    except ValueError:
+        return None
+    if not math.isfinite(parsed_delay) or parsed_delay < 0:
+        return None
+    return parsed_delay
+
+
+def _parse_request_rate(value: str) -> RequestRate | None:
+    """Return the request rate, or None if it is malformed."""
+    try:
+        parts = value.split()
+        if len(parts) == 2:
+            rate, time_period = parts
+        else:
+            rate, time_period = parts[0], ""
+
+        requests_str, seconds_str = rate.split("/")
+        time_unit = seconds_str[-1].lower()
+        if time_unit in ("s", "m", "h", "d"):
+            seconds = int(seconds_str[:-1])
+        else:
+            time_unit = "s"
+            seconds = int(seconds_str)
+        requests = int(requests_str)
+
+        if requests <= 0 or seconds <= 0:
+            raise ValueError(f"Request rate must be positive: {value!r}")
+
+        if time_unit == "m":
+            seconds *= 60
+        elif time_unit == "h":
+            seconds *= 3600
+        elif time_unit == "d":
+            seconds *= 86400
+
+        start_time = None
+        end_time = None
+        if time_period:
+            start_time, end_time = _parse_time_period(time_period)
+    except Exception:  # noqa: BLE001
+        return None
+
+    return RequestRate(requests, seconds, start_time, end_time)
+
+
+def _parse_visit_time(value: str) -> VisitTime | None:
+    """Return the visit time, or None if it is malformed."""
+    try:
+        try:
+            # "0400-0845"
+            start_time, end_time = _parse_time_period(value)
+        except ValueError:
+            # "0400 0845"
+            start_time, end_time = _parse_time_period(value, separator=" ")
+    except Exception:  # noqa: BLE001
+        return None
+    return VisitTime(start_time, end_time)
+
+
 class _RuleSet:
     """Internal class which stores rules for a user agent."""
 
@@ -148,11 +211,8 @@ class _RuleSet:
 
     @crawl_delay.setter
     def crawl_delay(self, delay: str) -> None:
-        try:
-            parsed_delay = float(delay)
-        except ValueError:
-            parsed_delay = None
-        if parsed_delay is None or not math.isfinite(parsed_delay) or parsed_delay < 0:
+        parsed_delay = _parse_crawl_delay(delay)
+        if parsed_delay is None:
             # Value is malformed, do nothing.
             logger.debug(
                 f"Malformed rule at line {self._parser_instance._total_line_seen} : "
@@ -168,37 +228,8 @@ class _RuleSet:
 
     @request_rate.setter
     def request_rate(self, value: str) -> None:
-        try:
-            parts = value.split()
-            if len(parts) == 2:
-                rate, time_period = parts
-            else:
-                rate, time_period = parts[0], ""
-
-            requests_str, seconds_str = rate.split("/")
-            time_unit = seconds_str[-1].lower()
-            if time_unit in ("s", "m", "h", "d"):
-                seconds = int(seconds_str[:-1])
-            else:
-                time_unit = "s"
-                seconds = int(seconds_str)
-            requests = int(requests_str)
-
-            if requests <= 0 or seconds <= 0:
-                raise ValueError(f"Request rate must be positive: {value!r}")
-
-            if time_unit == "m":
-                seconds *= 60
-            elif time_unit == "h":
-                seconds *= 3600
-            elif time_unit == "d":
-                seconds *= 86400
-
-            start_time = None
-            end_time = None
-            if time_period:
-                start_time, end_time = _parse_time_period(time_period)
-        except Exception:  # noqa: BLE001
+        parsed_rate = _parse_request_rate(value)
+        if parsed_rate is None:
             # Value is malformed, do nothing.
             logger.debug(
                 f"Malformed rule at line {self._parser_instance._total_line_seen} : "
@@ -206,7 +237,7 @@ class _RuleSet:
             )
             return
 
-        self._req_rate = RequestRate(requests, seconds, start_time, end_time)
+        self._req_rate = parsed_rate
 
     @property
     def visit_time(self) -> VisitTime | None:
@@ -215,17 +246,11 @@ class _RuleSet:
 
     @visit_time.setter
     def visit_time(self, value: str) -> None:
-        try:
-            try:
-                # "0400-0845"
-                start_time, end_time = _parse_time_period(value)
-            except ValueError:
-                # "0400 0845"
-                start_time, end_time = _parse_time_period(value, separator=" ")
-        except Exception:  # noqa: BLE001
+        parsed_time = _parse_visit_time(value)
+        if parsed_time is None:
             logger.debug(
                 f"Malformed rule at line {self._parser_instance._total_line_seen} : "
                 f"cannot set visit time using '{value}'. Ignoring this rule."
             )
             return
-        self._visit_time = VisitTime(start_time, end_time)
+        self._visit_time = parsed_time
